@@ -1,0 +1,393 @@
+import math
+import operator
+import re
+from functools import reduce
+
+
+TOKEN_RE = re.compile(r"""
+    (?P<WS>\s+)
+  | (?P<COMMENT>;[^\n]*)
+  | (?P<LPAREN>\()
+  | (?P<RPAREN>\))
+  | (?P<QUOTE>')
+  | (?P<STRING>"(?:\\.|[^"\\])*")
+  | (?P<NUMBER>-?\d+(?:\.\d+)?)
+  | (?P<SYMBOL>[^\s()';"]+)
+""", re.VERBOSE)
+
+
+_SYMBOLS = {}
+
+
+class Symbol(str):
+    __slots__ = ()
+
+    def __new__(cls, s):
+        sym = _SYMBOLS.get(s)
+        if sym is None:
+            sym = str.__new__(cls, s)
+            _SYMBOLS[s] = sym
+        return sym
+
+
+def tokenize(src):
+    pos, n = 0, len(src)
+    while pos < n:
+        m = TOKEN_RE.match(src, pos)
+        if not m:
+            raise SyntaxError(f"Unexpected char at {pos}: {src[pos]!r}")
+        pos = m.end()
+        kind = m.lastgroup
+        if kind in ("WS", "COMMENT"):
+            continue
+        yield kind, m.group()
+
+
+def parse(src):
+    tokens = list(tokenize(src))
+    idx = 0
+
+    def form():
+        nonlocal idx
+        if idx >= len(tokens):
+            raise SyntaxError("Unexpected EOF")
+        kind, val = tokens[idx]
+        idx += 1
+
+        if kind == "LPAREN":
+            items = []
+            while idx < len(tokens) and tokens[idx][0] != "RPAREN":
+                items.append(form())
+            if idx >= len(tokens):
+                raise SyntaxError("Missing )")
+            idx += 1
+            return items
+        if kind == "RPAREN":
+            raise SyntaxError("Unexpected )")
+        if kind == "QUOTE":
+            return [Symbol("quote"), form()]
+        if kind == "STRING":
+            return val[1:-1].encode().decode("unicode_escape")
+        if kind == "NUMBER":
+            return float(val) if "." in val else int(val)
+        return Symbol(val)
+
+    forms = []
+    while idx < len(tokens):
+        forms.append(form())
+    return forms
+
+
+class Env(dict):
+    __slots__ = ("outer",)
+
+    def __init__(self, outer=None, **kw):
+        super().__init__(**kw)
+        self.outer = outer
+
+    def lookup(self, name):
+        env = self
+        while env is not None:
+            if name in env:
+                return env[name]
+            env = env.outer
+        raise NameError(f"Unbound symbol: {name}")
+
+    def assign(self, name, value):
+        env = self
+        while env is not None:
+            if name in env:
+                env[name] = value
+                return
+            env = env.outer
+        raise NameError(f"Cannot set!: {name}")
+
+
+class Procedure:
+    __slots__ = ("params", "body", "env", "name")
+
+    def __init__(self, params, body, env, name="<lambda>"):
+        self.params = params
+        self.body = body
+        self.env = env
+        self.name = name
+
+    def __repr__(self):
+        return f"<procedure {self.name}>"
+
+
+class Macro:
+    __slots__ = ("params", "body", "env", "name")
+
+    def __init__(self, params, body, env, name="<macro>"):
+        self.params = params
+        self.body = body
+        self.env = env
+        self.name = name
+
+    def expand(self, args):
+        local = Env(self.env)
+        for p, a in zip(self.params, args):
+            local[p] = a
+        result = None
+        for sub in self.body:
+            result = evaluate(sub, local)
+        return result
+
+    def __repr__(self):
+        return f"<macro {self.name}>"
+
+
+QUOTE    = Symbol("quote")
+IF       = Symbol("if")
+DEFINE   = Symbol("define")
+LAMBDA   = Symbol("lambda")
+LET      = Symbol("let")
+BEGIN    = Symbol("begin")
+COND     = Symbol("cond")
+SET      = Symbol("set!")
+DEFMACRO = Symbol("defmacro")
+ELSE     = Symbol("else")
+
+
+def evaluate(expr, env):
+    while True:
+        if isinstance(expr, Symbol):
+            return env.lookup(expr)
+
+        if not isinstance(expr, list):
+            return expr
+
+        if not expr:
+            return []
+
+        head = expr[0]
+
+        if head is QUOTE:
+            return expr[1]
+
+        if head is IF:
+            test = evaluate(expr[1], env)
+            if test is not False and test is not None:
+                expr = expr[2]
+            elif len(expr) > 3:
+                expr = expr[3]
+            else:
+                return None
+            continue
+
+        if head is DEFINE:
+            target = expr[1]
+            if isinstance(target, list):
+                name, params = target[0], target[1:]
+                env[name] = Procedure(params, expr[2:], env, name)
+            else:
+                env[target] = evaluate(expr[2], env)
+            return None
+
+        if head is DEFMACRO:
+            name, params = expr[1], expr[2]
+            env[name] = Macro(params, expr[3:], env, name)
+            return None
+
+        if head is LAMBDA:
+            return Procedure(expr[1], expr[2:], env)
+
+        if head is LET:
+            local = Env(env)
+            for name, val in expr[1]:
+                local[name] = evaluate(val, env)
+            body = expr[2:]
+            if not body:
+                return None
+            for sub in body[:-1]:
+                evaluate(sub, local)
+            expr = body[-1]
+            env = local
+            continue
+
+        if head is BEGIN:
+            if len(expr) == 1:
+                return None
+            for sub in expr[1:-1]:
+                evaluate(sub, env)
+            expr = expr[-1]
+            continue
+
+        if head is COND:
+            chosen = None
+            for clause in expr[1:]:
+                test = clause[0]
+                if test is ELSE or evaluate(test, env):
+                    chosen = [BEGIN] + clause[1:]
+                    break
+            if chosen is None:
+                return None
+            expr = chosen
+            continue
+
+        if head is SET:
+            env.assign(expr[1], evaluate(expr[2], env))
+            return None
+
+        proc = evaluate(head, env)
+
+        if isinstance(proc, Macro):
+            expr = proc.expand(expr[1:])
+            continue
+
+        args = [evaluate(a, env) for a in expr[1:]]
+
+        if isinstance(proc, Procedure):
+            if len(args) != len(proc.params):
+                raise TypeError(
+                    f"{proc.name}: expected {len(proc.params)} args, "
+                    f"got {len(args)}"
+                )
+            local = Env(proc.env)
+            for p, a in zip(proc.params, args):
+                local[p] = a
+            body = proc.body
+            if not body:
+                return None
+            for sub in body[:-1]:
+                evaluate(sub, local)
+            expr = body[-1]
+            env = local
+            continue
+
+        if callable(proc):
+            return proc(*args)
+
+        raise TypeError(f"Not callable: {proc!r}")
+
+
+def _b_div(*xs):
+    if len(xs) == 1:
+        return 1 / xs[0]
+    return reduce(operator.truediv, xs)
+
+
+def _b_sub(*xs):
+    if len(xs) == 1:
+        return -xs[0]
+    return reduce(operator.sub, xs)
+
+
+BUILTINS = {
+    "+":  lambda *xs: sum(xs),
+    "-":  _b_sub,
+    "*":  lambda *xs: math.prod(xs),
+    "/":  _b_div,
+    "%":  operator.mod,
+    "//": operator.floordiv,
+    "**": operator.pow,
+    "abs": abs,
+    "min": min,
+    "max": max,
+    "sqrt": math.sqrt,
+
+    "=":  operator.eq,
+    "!=": operator.ne,
+    "<":  operator.lt,
+    ">":  operator.gt,
+    "<=": operator.le,
+    ">=": operator.ge,
+    "not": lambda x: not x,
+
+    "list":   lambda *xs: list(xs),
+    "cons":   lambda x, xs: [x] + (list(xs) if xs else []),
+    "car":    lambda xs: xs[0],
+    "cdr":    lambda xs: xs[1:],
+    "length": len,
+    "append": lambda *xss: [x for xs in xss for x in (xs or [])],
+    "reverse": lambda xs: list(reversed(xs)),
+    "map":    lambda f, xs: [f(x) for x in xs],
+    "filter": lambda f, xs: [x for x in xs if f(x)],
+    "reduce": lambda f, xs: reduce(f, xs),
+    "null?":  lambda xs: xs is None or xs == [],
+
+    "print":   lambda *xs: print(*xs, sep=" "),
+    "println": lambda *xs: print(*xs, sep=" "),
+    "str":     lambda *xs: "".join(str(x) for x in xs),
+}
+
+
+def make_global():
+    env = Env()
+    env.update(BUILTINS)
+    env["#t"] = True
+    env["#f"] = False
+    env["nil"] = None
+    return env
+
+
+def run(source, env=None):
+    env = env or make_global()
+    result = None
+    for form in parse(source):
+        result = evaluate(form, env)
+    return result
+
+
+def repl():
+    env = make_global()
+    print("Mini-Lisp REPL. Ctrl+D — выход.")
+    buffer = ""
+    while True:
+        try:
+            prompt = "... " if buffer.count("(") > buffer.count(")") else ">>> "
+            line = input(prompt)
+        except EOFError:
+            print()
+            break
+        buffer += line + "\n"
+        if buffer.count("(") > buffer.count(")"):
+            continue
+        try:
+            result = run(buffer, env)
+            if result is not None:
+                print("=>", result)
+        except Exception as e:
+            print(f"Error: {type(e).__name__}: {e}")
+        buffer = ""
+
+
+DEMO = """
+(define (fact n acc)
+  (if (< n 2) acc (fact (- n 1) (* acc n))))
+
+(define (fib n a b)
+  (if (= n 0) a (fib (- n 1) b (+ a b))))
+
+(defmacro unless (cond body)
+  (list 'if cond nil body))
+
+(define (counter)
+  (let ((n 0))
+    (lambda () (set! n (+ n 1)) n)))
+
+(define (compose f g) (lambda (x) (f (g x))))
+
+(print "fact 10   =" (fact 10 1))
+(print "fact 100  =" (fact 100 1))
+(print "fact 1000 =" (fact 1000 1))
+(print "fib 100   =" (fib 100 0 1))
+
+(define c (counter))
+(print "counter   =" (c) (c) (c) (c))
+
+(define inc (lambda (x) (+ x 1)))
+(define dbl (lambda (x) (* x 2)))
+(print "compose   =" ((compose inc dbl) 5))
+
+(print "map       =" (map (lambda (x) (* x x)) (list 1 2 3 4 5)))
+(print "filter    =" (filter (lambda (x) (> x 2)) (list 1 2 3 4 5)))
+(print "reduce    =" (reduce + (list 1 2 3 4 5)))
+
+(unless #f (print "unless работает"))
+"""
+
+
+if __name__ == "__main__":
+    run(DEMO)
