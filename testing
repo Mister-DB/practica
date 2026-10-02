@@ -2,7 +2,8 @@ import math
 import operator
 import re
 from functools import reduce
-
+# Миха ты копаешь близко уже
+# Прям горячо, но не тута
 
 TOKEN_RE = re.compile(r"""
     (?P<WS>\s+)
