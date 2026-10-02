@@ -1,0 +1,31 @@
+import base64
+from functools import lru_cache
+
+
+class _LinkBuilder:
+    __slots__ = ("_parts",)
+
+    def __init__(self, parts: tuple[str, ...]) -> None:
+        self._parts = parts
+
+    @staticmethod
+    @lru_cache(maxsize=None)
+    def _decode(part: str) -> str:
+        return base64.b64decode(part).decode("utf-8")
+
+    def build(self) -> str:
+        return "".join(self._decode(part) for part in self._parts)
+
+
+def _main() -> None:
+    parts = (
+        "aHR0cHM6Ly9zdGVhbWNvbW11bml0eS5jb20v",
+        "aWQvWmFkcm90X1Byb2dyYW1pc3Qv",
+    )
+
+    link = _LinkBuilder(parts).build()
+    print(link)
+
+
+if __name__ == "__main__":
+    _main()
