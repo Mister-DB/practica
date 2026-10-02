@@ -1,0 +1,39 @@
+public class Mandelbrot {
+    public static void main(String[] args) {
+        int width = 120;
+        int height = 40;
+        int maxIter = 200;
+        String ramp = " .:-=+*#%@";
+
+        double xmin = -2.5, xmax = 1.0;
+        double ymin = -1.2, ymax = 1.2;
+
+        StringBuilder sb = new StringBuilder();
+
+        for (int py = 0; py < height; py++) {
+            double ci = ymin + (py / (double) height) * (ymax - ymin);
+            for (int px = 0; px < width; px++) {
+                double cr = xmin + (px / (double) width) * (xmax - xmin);
+
+                double zr = 0, zi = 0;
+                int iter = 0;
+                while (zr * zr + zi * zi <= 4 && iter < maxIter) {
+                    double tmp = zr * zr - zi * zi + cr;
+                    zi = 2 * zr * zi + ci;
+                    zr = tmp;
+                    iter++;
+                }
+
+                if (iter == maxIter) {
+                    sb.append('@');
+                } else {
+                    int idx = iter * (ramp.length() - 1) / maxIter;
+                    sb.append(ramp.charAt(idx));
+                }
+            }
+            sb.append('\n');
+        }
+
+        System.out.print(sb);
+    }
+}
